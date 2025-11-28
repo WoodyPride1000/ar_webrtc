@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Ψテトリス — 光の絆</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/aframe-extras@6.1.1/dist/aframe-extras.min.js"></script>
+<style>
+  body { margin:0; overflow:hidden; background:#0a001f; }
+  #distanceText {
+    position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+    font-size:80px; font-weight:900; letter-spacing:-5px;
+    color:transparent; background:linear-gradient(45deg,#ff9eff,#7af9ff,#ffff9e);
+    -webkit-background-clip:text; background-clip:text;
+    text-shadow:0 0 60px rgba(122,249,255,0.8);
+    opacity:0.9; pointer-events:none; z-index:9999;
+    animation: breathe 8s infinite;
+  }
+  @keyframes breathe { 0%,100% { transform:translate(-50%,-50%) scale(1); opacity:0.9; } 50% { transform:translate(-50%,-50%) scale(1.05); opacity:1; } }
+</style>
+</head>
+<body>
+
+<a-text id="distanceText" value="---" align="center"></a-text>
+
+<a-scene 
+  embedded 
+  arjs="sourceType: webcam; debugUIEnabled: false;"
+  renderer="colorManagement: true;"
+  background="color: #0a001f">
+
+  <a-camera gps-camera rotation-reader></a-camera>
+
+  <!-- 光の絆の線（距離が離れるほど太く、明るく、温かく） -->
+  <a-entity id="bond" line="color: #ff9eff"></a-entity>
+
+  <!-- 相手の位置に現れる「ハートの結晶」 -->
+  <a-entity id="heartCrystal" visible="false"></a-entity>
+
+</a-scene>
+
+<script>
+let localPos = null;
+let remotePos = null;
+let distance = 0;
+let pc = null;
+let dc = null;
+
+const distanceText = document.getElementById('distanceText');
+const bond = document.getElementById('bond');
+const heartCrystal = document.getElementById('heartCrystal');
+
+function getPos() {
+  navigator.geolocation.watchPosition(p => {
+    localPos = {lat:p.coords.latitude, lng:p.coords.longitude};
+  }, console.error, {enableHighAccuracy:true});
+}
+
+function calcDistance(p1, p2) {
+  const R = 6371000;
+  const toRad = v => v * Math.PI / 180;
+  const dLat = toRad(p2.lat - p1.lat);
+  const dLon = toRad(p2.lng - p1.lng);
+  const a = Math.sin(dLat/2)**2 + Math.cos(toRad(p1.lat)) * Math.cos(toRad(p2.lat)) * Math.sin(dLon/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+// WebRTC
+async function connect() {
+  pc = new RTCPeerConnection();
+  dc = pc.createDataChannel('bond');
+
+  dc.onmessage = e => {
+    const data = JSON.parse(e.data);
+    remotePos = data.pos;
+    distance = calcDistance(localPos, remotePos);
+
+    // 距離を「優しい色と太さ」で表現
+    const thickness = Math.min(0.3, distance / 10000); // 遠いほど太く
+    const hue = 300 + (distance / 100000) * 60; // 遠いほど暖色に
+    const brightness = Math.min(1, 0.6 + distance / 200000);
+
+    bond.setAttribute('line', {
+      start: "0 1.6 0",
+      end: `${(remotePos.lng - localPos.lng)*100000} 1.6 ${(remotePos.lat - localPos.lat)*100000}`,
+      color: `hsl(${hue}, 100%, ${brightness*100}%)`,
+      opacity: 0.9
+    });
+    bond.setAttribute('line__thick', `width: ${thickness}`);
+
+    // 距離を「文字」ではなく「大きさ・色・透明度」で表現
+    const scale = 0.8 + (distance / 500000);
+    const opacity = Math.max(0.4, 1 - distance / 1000000);
+    distanceText.setAttribute('value', distance < 1000 ? 
+      `${distance.toFixed(0)}m` : 
+      `${(distance/1000).toFixed(1)}km`);
+    distanceText.setAttribute('scale', `${scale} ${scale} ${scale}`);
+    distanceText.object3D.position.set(0, 1.6, -3);
+    distanceText.setAttribute('material', 'opacity', opacity);
+
+    // 相手の位置に現れるハートの結晶（距離が離れるほど大きく輝く）
+    heartCrystal.setAttribute('visible', true);
+    heartCrystal.setAttribute('gps-entity-place', `latitude:${remotePos.lat}; longitude:${remotePos.lng}`);
+    const crystalSize = 0.5 + distance / 200000;
+    heartCrystal.setAttribute('gltf-model', '#heart');
+    heartCrystal.setAttribute('scale', `${crystalSize} ${crystalSize} ${crystalSize}`);
+    heartCrystal.setAttribute('animation', `property: rotation; to: 0 360 0; loop: true; dur: ${8000 + distance/100}; easing: linear`);
+    heartCrystal.setAttribute('animation__glow', `property: material.emissiveIntensity; from: 0.5; to: 1.5; loop: true; dir: alternate; dur: ${3000 + distance/50}`);
+  };
+
+  pc.onicecandidate = e => {
+    if (!e.candidate) {
+      prompt("このコードを大切な人に送ってね", JSON.stringify(pc.localDescription));
+    }
+  };
+
+  pc.createOffer().then(o => pc.setLocalDescription(o));
+}
+
+getPos();
+connect();
+
+setInterval(() => {
+  if (dc?.readyState === 'open' && localPos) {
+    dc.send(JSON.stringify({type:'pos', pos: localPos}));
+  }
+}, 2000);
+</script>
+
+<!-- ハートの3Dモデル（シンプルなハート） -->
+<a-assets>
+  <a-asset-item id="heart" src="https://cdn.jsdelivr.net/gh/mrdoob/three.js@master/examples/models/gltf/heart.glb"></a-asset-item>
+</a-assets>
+</body>
+</html>
