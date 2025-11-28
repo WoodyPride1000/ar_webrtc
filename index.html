@@ -5,40 +5,59 @@
 <title>Ψテトリス — 光の絆</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+<script src="https://raw.githack.com/AR-js-org/AR.js/master/aframe/build/aframe-ar.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/aframe-extras@6.1.1/dist/aframe-extras.min.js"></script>
 <style>
-  body { margin:0; overflow:hidden; background:#0a001f; }
-  #distanceText {
-    position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
-    font-size:80px; font-weight:900; letter-spacing:-5px;
-    color:transparent; background:linear-gradient(45deg,#ff9eff,#7af9ff,#ffff9e);
-    -webkit-background-clip:text; background-clip:text;
-    text-shadow:0 0 60px rgba(122,249,255,0.8);
-    opacity:0.9; pointer-events:none; z-index:9999;
-    animation: breathe 8s infinite;
-  }
-  @keyframes breathe { 0%,100% { transform:translate(-50%,-50%) scale(1); opacity:0.9; } 50% { transform:translate(-50%,-50%) scale(1.05); opacity:1; } }
+ body { margin:0; overflow:hidden; background:#0a001f; }
+ #distanceText {
+ position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+ font-size:80px; font-weight:900; letter-spacing:-5px;
+ color:transparent; background:linear-gradient(45deg,#ff9eff,#7af9ff,#ffff9e);
+ -webkit-background-clip:text; background-clip:text;
+ text-shadow:0 0 60px rgba(122,249,255,0.8);
+ opacity:0.9; pointer-events:none; z-index:9999;
+ animation: breathe 8s infinite;
+ }
+ @keyframes breathe { 0%,100% { transform:translate(-50%,-50%) scale(1); opacity:0.9; } 50% { transform:translate(-50%,-50%) scale(1.05); opacity:1; } }
+ /* 簡易 UI */
+ #signals {
+ position:fixed; right:10px; bottom:10px; z-index:9999; color:#fff; font-family: sans-serif;
+ background:rgba(0,0,0,0.4); padding:8px; border-radius:6px;
+ max-width:320px;
+ }
+ #signals button { margin:4px; }
+ #signals small { display:block; margin-top:6px; opacity:0.85; font-size:12px; }
 </style>
 </head>
 <body>
 
-<a-text id="distanceText" value="---" align="center"></a-text>
+<!-- 文字表示（フォールバック用に DOM も残す） -->
+<div id="distanceText">---</div>
 
 <a-scene 
-  embedded 
-  arjs="sourceType: webcam; debugUIEnabled: false;"
-  renderer="colorManagement: true;"
-  background="color: #0a001f">
+ embedded 
+ arjs="sourceType: webcam; debugUIEnabled: false;"
+ renderer="colorManagement: true;"
+ background="color: #0a001f">
 
-  <a-camera gps-camera rotation-reader></a-camera>
+ <!-- カメラ（gps-camera は AR.js によって提供されます） -->
+ <a-entity camera gps-camera rotation-reader></a-entity>
 
-  <!-- 光の絆の線（距離が離れるほど太く、明るく、温かく） -->
-  <a-entity id="bond" line="color: #ff9eff"></a-entity>
+ <!-- 光の絆の線（カメラ位置 → ハート位置のワールド座標で描く） -->
+ <a-entity id="bondLine" line="start: 0 0 0; end: 0 0 0; color: #ff9eff; opacity: 0.9"></a-entity>
 
-  <!-- 相手の位置に現れる「ハートの結晶」 -->
-  <a-entity id="heartCrystal" visible="false"></a-entity>
+ <!-- 相手の位置に現れる「ハートの結晶」 -->
+ <a-entity id="heartCrystal" visible="false"></a-entity>
 
 </a-scene>
+
+<!-- 簡易シグナリング UI（開発用） -->
+<div id="signals">
+ <button id="createOfferBtn">Offer を作る (表示のみ)</button>
+ <button id="pasteAnswerBtn">Answer を貼る (Offer 側用)</button>
+ <button id="acceptRemoteBtn">受け取った Offer を貼って Answer を生成 (Answer 側用)</button>
+ <small>手動シグナリング: Offer を作って相手に送信 → 相手が Answer を生成して返す → Offer 側が Answer を貼る、という 2 ステップのフローになっています。</small>
+</div>
 
 <script>
 let localPos = null;
@@ -46,91 +65,243 @@ let remotePos = null;
 let distance = 0;
 let pc = null;
 let dc = null;
+let sendIntervalId = null;
 
-const distanceText = document.getElementById('distanceText');
-const bond = document.getElementById('bond');
+const distanceTextDOM = document.getElementById('distanceText');
+const bondLine = document.getElementById('bondLine');
 const heartCrystal = document.getElementById('heartCrystal');
+const createOfferBtn = document.getElementById('createOfferBtn');
+const pasteAnswerBtn = document.getElementById('pasteAnswerBtn');
+const acceptRemoteBtn = document.getElementById('acceptRemoteBtn');
 
+createOfferBtn.addEventListener('click', () => createOfferFlow());
+pasteAnswerBtn.addEventListener('click', () => acceptAnswerFlow());
+acceptRemoteBtn.addEventListener('click', () => acceptRemoteFlow());
+
+/* geolocation */
+let watchId = null;
 function getPos() {
-  navigator.geolocation.watchPosition(p => {
-    localPos = {lat:p.coords.latitude, lng:p.coords.longitude};
-  }, console.error, {enableHighAccuracy:true});
+ if (!('geolocation' in navigator)) {
+ console.error('Geolocation not available');
+ return;
+ }
+ watchId = navigator.geolocation.watchPosition(p => {
+ localPos = {lat: p.coords.latitude, lng: p.coords.longitude};
+ }, err => {
+ console.error('geolocation error', err);
+ }, {enableHighAccuracy:true, maximumAge:2000});
 }
 
+/* Haversine */
 function calcDistance(p1, p2) {
-  const R = 6371000;
-  const toRad = v => v * Math.PI / 180;
-  const dLat = toRad(p2.lat - p1.lat);
-  const dLon = toRad(p2.lng - p1.lng);
-  const a = Math.sin(dLat/2)**2 + Math.cos(toRad(p1.lat)) * Math.cos(toRad(p2.lat)) * Math.sin(dLon/2)**2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+ if (!p1 || !p2) return null;
+ const R = 6371000;
+ const toRad = v => v * Math.PI / 180;
+ const dLat = toRad(p2.lat - p1.lat);
+ const dLon = toRad(p2.lng - p1.lng);
+ const a = Math.sin(dLat/2)**2 + Math.cos(toRad(p1.lat)) * Math.cos(toRad(p2.lat)) * Math.sin(dLon/2)**2;
+ return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
-// WebRTC
-async function connect() {
-  pc = new RTCPeerConnection();
-  dc = pc.createDataChannel('bond');
+/* Peer & DataChannel setup */
+function setupPeerConnection() {
+ if (pc) return; // 既に初期化済みなら何もしない
+ pc = new RTCPeerConnection();
 
-  dc.onmessage = e => {
-    const data = JSON.parse(e.data);
-    remotePos = data.pos;
-    distance = calcDistance(localPos, remotePos);
+ // 受信側の datachannel を受け取るハンドラ
+ pc.ondatachannel = (evt) => {
+   dc = evt.channel;
+   setupDataChannel(dc);
+ };
 
-    // 距離を「優しい色と太さ」で表現
-    const thickness = Math.min(0.3, distance / 10000); // 遠いほど太く
-    const hue = 300 + (distance / 100000) * 60; // 遠いほど暖色に
-    const brightness = Math.min(1, 0.6 + distance / 200000);
+ pc.onicecandidate = (e) => {
+   console.log('icecandidate', e.candidate);
+ };
 
-    bond.setAttribute('line', {
-      start: "0 1.6 0",
-      end: `${(remotePos.lng - localPos.lng)*100000} 1.6 ${(remotePos.lat - localPos.lat)*100000}`,
-      color: `hsl(${hue}, 100%, ${brightness*100}%)`,
-      opacity: 0.9
-    });
-    bond.setAttribute('line__thick', `width: ${thickness}`);
-
-    // 距離を「文字」ではなく「大きさ・色・透明度」で表現
-    const scale = 0.8 + (distance / 500000);
-    const opacity = Math.max(0.4, 1 - distance / 1000000);
-    distanceText.setAttribute('value', distance < 1000 ? 
-      `${distance.toFixed(0)}m` : 
-      `${(distance/1000).toFixed(1)}km`);
-    distanceText.setAttribute('scale', `${scale} ${scale} ${scale}`);
-    distanceText.object3D.position.set(0, 1.6, -3);
-    distanceText.setAttribute('material', 'opacity', opacity);
-
-    // 相手の位置に現れるハートの結晶（距離が離れるほど大きく輝く）
-    heartCrystal.setAttribute('visible', true);
-    heartCrystal.setAttribute('gps-entity-place', `latitude:${remotePos.lat}; longitude:${remotePos.lng}`);
-    const crystalSize = 0.5 + distance / 200000;
-    heartCrystal.setAttribute('gltf-model', '#heart');
-    heartCrystal.setAttribute('scale', `${crystalSize} ${crystalSize} ${crystalSize}`);
-    heartCrystal.setAttribute('animation', `property: rotation; to: 0 360 0; loop: true; dur: ${8000 + distance/100}; easing: linear`);
-    heartCrystal.setAttribute('animation__glow', `property: material.emissiveIntensity; from: 0.5; to: 1.5; loop: true; dir: alternate; dur: ${3000 + distance/50}`);
-  };
-
-  pc.onicecandidate = e => {
-    if (!e.candidate) {
-      prompt("このコードを大切な人に送ってね", JSON.stringify(pc.localDescription));
-    }
-  };
-
-  pc.createOffer().then(o => pc.setLocalDescription(o));
+ pc.onconnectionstatechange = () => {
+   console.log('pc state', pc.connectionState);
+ };
 }
 
+function setupDataChannel(channel) {
+ channel.onopen = () => {
+   console.log('datachannel open');
+   // 開いたら自分の位置を定期送信
+   if (!sendIntervalId) {
+     sendIntervalId = setInterval(() => {
+       if (channel?.readyState === 'open' && localPos) {
+         channel.send(JSON.stringify({type:'pos', pos: localPos}));
+       }
+     }, 2000);
+   }
+ };
+ channel.onclose = () => {
+   console.log('datachannel closed');
+   if (sendIntervalId) {
+     clearInterval(sendIntervalId);
+     sendIntervalId = null;
+   }
+ };
+ channel.onerror = (e) => console.error('dc error', e);
+ channel.onmessage = (e) => {
+   try {
+     const data = JSON.parse(e.data);
+     if (data.pos) {
+       remotePos = data.pos;
+       distance = calcDistance(localPos, remotePos) || 0;
+     }
+   } catch(err) {
+     console.error('invalid message', e.data);
+   }
+ };
+}
+
+/* シグナリング（Offer 側）: Offer を作成して SDP を表示（ここでは Answer を待たずに戻る） */
+async function createOfferFlow() {
+ try {
+   setupPeerConnection();
+   // Offer 作成側は自分でデータチャネルを作る
+   try {
+     dc = pc.createDataChannel('bond');
+     setupDataChannel(dc);
+   } catch (err) {
+     console.warn('createDataChannel failed', err);
+   }
+
+   const offer = await pc.createOffer();
+   await pc.setLocalDescription(offer);
+
+   // ICE gathering を簡易に待つ
+   await new Promise(resolve => {
+     if (pc.iceGatheringState === 'complete') return resolve();
+     function check() {
+       if (pc.iceGatheringState === 'complete') {
+         pc.removeEventListener('icegatheringstatechange', check);
+         resolve();
+       }
+     }
+     pc.addEventListener('icegatheringstatechange', check);
+     setTimeout(resolve, 5000);
+   });
+
+   const localSDP = JSON.stringify(pc.localDescription);
+   // Offer を表示してコピーさせるだけ（Answer は別ボタンで貼り付ける）
+   alert('Offer SDP を生成しました。相手に送ってください（表示は次のダイアログに出ます）。');
+   // long prompt so user can copy
+   prompt('この SDP (Offer) を相手に送ってください（コピーして閉じてOK）。', localSDP);
+ } catch (err) {
+   console.error('createOfferFlow error', err);
+   alert('Offer 生成に失敗しました: ' + err);
+ }
+}
+
+/* Offer 側が Answer を貼るための処理（別ボタン） */
+async function acceptAnswerFlow() {
+ if (!pc) {
+   alert('まず Offer を作成してください（「Offer を作る」ボタン）。');
+   return;
+ }
+ const remoteSDP = prompt('相手から受け取った Answer SDP をここに貼ってください。');
+ if (!remoteSDP) return;
+ try {
+   const desc = JSON.parse(remoteSDP);
+   await pc.setRemoteDescription(desc);
+   alert('Answer をセットしました。接続が確立されるまでお待ちください。');
+ } catch (err) {
+   console.error('acceptAnswerFlow error', err);
+   alert('Answer のセットに失敗しました: ' + err);
+ }
+}
+
+/* シグナリング（Answer 側）: 受け取った Offer を貼って Answer を生成して返す */
+async function acceptRemoteFlow() {
+ try {
+   setupPeerConnection();
+   const remoteSDP = prompt('相手から受け取った Offer の SDP を貼ってください。キャンセルで中止します。');
+   if (!remoteSDP) return;
+   const offer = JSON.parse(remoteSDP);
+   await pc.setRemoteDescription(offer);
+
+   const answer = await pc.createAnswer();
+   await pc.setLocalDescription(answer);
+
+   // ICE gather wait
+   await new Promise(resolve => {
+     if (pc.iceGatheringState === 'complete') return resolve();
+     function check() {
+       if (pc.iceGatheringState === 'complete') {
+         pc.removeEventListener('icegatheringstatechange', check);
+         resolve();
+       }
+     }
+     pc.addEventListener('icegatheringstatechange', check);
+     setTimeout(resolve, 5000);
+   });
+
+   const localSDP = JSON.stringify(pc.localDescription);
+   // 回答（Answer）を表示して相手に送らせる
+   prompt('これがあなたの Answer SDP です。相手に送り、彼らがセットするように伝えてください。', localSDP);
+ } catch (err) {
+   console.error('acceptRemoteFlow error', err);
+   alert('Offer の処理に失敗しました: ' + err);
+ }
+}
+
+/* 描画更新: heartCrystal のワールド位置を参照して線を引く */
+function updateVisuals() {
+ // 数値テキスト（DOM）を更新（視認性のため）
+ if (distance != null) {
+   distanceTextDOM.textContent = distance < 1000 ? `${distance.toFixed(0)} m` : `${(distance/1000).toFixed(1)} km`;
+ }
+
+ // ハート表示（gps-entity-place を使い、モデルは assets で指定）
+ if (remotePos) {
+   heartCrystal.setAttribute('visible', true);
+   heartCrystal.setAttribute('gps-entity-place', `latitude:${remotePos.lat}; longitude:${remotePos.lng}`);
+   const crystalSize = 0.5 + (distance || 0) / 200000;
+   heartCrystal.setAttribute('gltf-model', '#heart');
+   heartCrystal.setAttribute('scale', `${crystalSize} ${crystalSize} ${crystalSize}`);
+   heartCrystal.setAttribute('animation', `property: rotation; to: 0 360 0; loop: true; dur: ${8000 + (distance || 0)/100}; easing: linear`);
+ }
+
+ // bond（線）はカメラのワールド座標と heartCrystal のワールド座標で描く
+ const camEl = document.querySelector('[camera]');
+ if (window.THREE && camEl && heartCrystal && heartCrystal.object3D && camEl.object3D) {
+   const camPos = new THREE.Vector3();
+   camEl.object3D.getWorldPosition(camPos);
+   const tgtPos = new THREE.Vector3();
+   heartCrystal.object3D.getWorldPosition(tgtPos);
+
+   bondLine.setAttribute('line', {
+     start: `${camPos.x} ${camPos.y} ${camPos.z}`,
+     end: `${tgtPos.x} ${tgtPos.y} ${tgtPos.z}`,
+     color: `hsl(${Math.min(360, 300 + ((distance || 0) / 100000) * 60)}, 100%, ${Math.min(100, (0.6 + ((distance || 0) / 200000))*100)}%)`,
+     opacity: Math.max(0.4, 1 - ((distance || 0) / 1000000))
+   });
+ }
+}
+
+/* シーンロード後に定期的に updateVisuals を呼ぶ（heart の world pos は非同期） */
+AFRAME.scenes[0]?.addEventListener
+  ? AFRAME.scenes[0].addEventListener('loaded', () => {
+      setInterval(updateVisuals, 500);
+    })
+  : setInterval(updateVisuals, 500);
+
+/* 初期化 */
 getPos();
-connect();
 
-setInterval(() => {
-  if (dc?.readyState === 'open' && localPos) {
-    dc.send(JSON.stringify({type:'pos', pos: localPos}));
-  }
-}, 2000);
+/* アンロード時のクリーンアップ */
+window.addEventListener('beforeunload', () => {
+ if (watchId != null) navigator.geolocation.clearWatch(watchId);
+ if (sendIntervalId) clearInterval(sendIntervalId);
+ if (pc) pc.close();
+});
 </script>
 
 <!-- ハートの3Dモデル（シンプルなハート） -->
 <a-assets>
-  <a-asset-item id="heart" src="https://cdn.jsdelivr.net/gh/mrdoob/three.js@master/examples/models/gltf/heart.glb"></a-asset-item>
+ <a-asset-item id="heart" src="https://cdn.jsdelivr.net/gh/mrdoob/three.js@master/examples/models/gltf/heart.glb"></a-asset-item>
 </a-assets>
 </body>
 </html>
