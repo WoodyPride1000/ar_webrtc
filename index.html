@@ -2,74 +2,89 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<title>Ψテトリス — 光の絆</title>
+<title>P2P Location Bond — AR Co-location [Ginzburg-Landau TDGL]</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
 <script src="https://raw.githack.com/AR-js-org/AR.js/master/aframe/build/aframe-ar.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/aframe-extras@6.1.1/dist/aframe-extras.min.js"></script>
 <style>
- body { margin:0; overflow:hidden; background:#0a001f; }
- #distanceText {
- position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
- font-size:80px; font-weight:900; letter-spacing:-5px;
- color:transparent; background:linear-gradient(45deg,#ff9eff,#7af9ff,#ffff9e);
- -webkit-background-clip:text; background-clip:text;
- text-shadow:0 0 60px rgba(122,249,255,0.8);
- opacity:0.9; pointer-events:none; z-index:9999;
- animation: breathe 8s infinite;
- }
- @keyframes breathe { 0%,100% { transform:translate(-50%,-50%) scale(1); opacity:0.9; } 50% { transform:translate(-50%,-50%) scale(1.05); opacity:1; } }
- /* 簡易 UI */
- #signals {
- position:fixed; right:10px; bottom:10px; z-index:9999; color:#fff; font-family: sans-serif;
- background:rgba(0,0,0,0.4); padding:8px; border-radius:6px;
- max-width:320px;
- }
- #signals button { margin:4px; }
- #signals small { display:block; margin-top:6px; opacity:0.85; font-size:12px; }
+ body { margin:0; overflow:hidden; background:#0a001f; }
+ #distanceDisplay {
+  position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+  font-size:80px; font-weight:900; letter-spacing:-5px;
+  color:transparent; background:linear-gradient(45deg,#ff9eff,#7af9ff,#ffff9e);
+  -webkit-background-clip:text; background-clip:text;
+  text-shadow:0 0 60px rgba(122,249,255,0.8);
+  opacity:0.9; pointer-events:none; z-index:9999;
+  animation: pulseEffect 8s infinite;
+ }
+ @keyframes pulseEffect { 0%,100% { transform:translate(-50%,-50%) scale(1); opacity:0.9; } 50% { transform:translate(-50%,-50%) scale(1.05); opacity:1; } }
+
+ #probabilityDisplay {
+  position:fixed; top:10px; left:50%; transform:translateX(-50%);
+  font-size:30px; font-weight:700;
+  color:#ff1f1f;
+  text-shadow:0 0 10px rgba(255,50,50,0.8);
+  z-index:9999; pointer-events:none;
+  font-family: sans-serif;
+ }
+
+ #controlPanel {
+  position:fixed; right:10px; bottom:10px; z-index:9999; color:#fff; font-family: sans-serif;
+  background:rgba(0,0,0,0.4); padding:8px; border-radius:6px;
+  max-width:320px;
+ }
+ #controlPanel button { margin:4px; }
+ #controlPanel small { display:block; margin-top:6px; opacity:0.85; font-size:12px; }
 </style>
 </head>
 <body>
 
-<!-- 文字表示（フォールバック用に DOM も残す） -->
-<div id="distanceText">---</div>
+<div id="probabilityDisplay">ブロック発生確率: --%</div>
+<div id="distanceDisplay">---</div>
 
-<a-scene 
- embedded 
- arjs="sourceType: webcam; debugUIEnabled: false;"
- renderer="colorManagement: true;"
- background="color: #0a001f">
+<a-scene
+ embedded
+ arjs="sourceType: webcam; debugUIEnabled: false;"
+ renderer="colorManagement: true;"
+ background="color: #0a001f">
 
- <!-- カメラ（gps-camera は AR.js によって提供されます） -->
- <a-entity camera gps-camera rotation-reader></a-entity>
+  <a-entity camera gps-camera rotation-reader></a-entity>
 
- <!-- 光の絆の線（カメラ位置 → ハート位置のワールド座標で描く） -->
- <a-entity id="bondLine" line="start: 0 0 0; end: 0 0 0; color: #ff9eff; opacity: 0.9"></a-entity>
+  <a-entity id="connectionLine" line="start: 0 0 0; end: 0 0 0; color: #ff9eff; opacity: 0.9"></a-entity>
 
- <!-- 相手の位置に現れる「ハートの結晶」 -->
- <a-entity id="heartCrystal" visible="false"></a-entity>
+  <a-entity id="remoteTarget" visible="false"></a-entity>
 
 </a-scene>
 
-<!-- 簡易シグナリング UI（開発用） -->
-<div id="signals">
- <button id="createOfferBtn">Offer を作る (表示のみ)</button>
- <button id="pasteAnswerBtn">Answer を貼る (Offer 側用)</button>
- <button id="acceptRemoteBtn">受け取った Offer を貼って Answer を生成 (Answer 側用)</button>
- <small>手動シグナリング: Offer を作って相手に送信 → 相手が Answer を生成して返す → Offer 側が Answer を貼る、という 2 ステップのフローになっています。</small>
+<div id="controlPanel">
+ <button id="createOfferBtn">Offer を生成する (Step 1)</button>
+ <button id="pasteAnswerBtn">Answer を貼り付け接続を確立 (Offer側用)</button>
+ <button id="acceptRemoteBtn">Offer を受け取り Answer を生成 (Answer側用)</button>
+ <small>手動シグナリング手順: 1. Offer側がOfferを生成。2. Answer側がOfferを貼り付けAnswerを生成し返す。3. Offer側がAnswerを貼り付け接続完了。</small>
 </div>
 
 <script>
+/* -----------------------
+   グローバル変数（位置・通信・フィルタ）
+   ----------------------- */
 let localPos = null;
 let remotePos = null;
+let filteredPos = null;
 let distance = 0;
 let pc = null;
 let dc = null;
 let sendIntervalId = null;
+let watchId = null;
+let localAccuracy = 100;
+let decoherenceNoise = 0;
+let isingStrength = 0;
 
-const distanceTextDOM = document.getElementById('distanceText');
-const bondLine = document.getElementById('bondLine');
-const heartCrystal = document.getElementById('heartCrystal');
+/* DOM */
+const distanceDisplayDOM = document.getElementById('distanceDisplay');
+const probabilityDisplayDOM = document.getElementById('probabilityDisplay');
+const connectionLine = document.getElementById('connectionLine');
+const remoteTarget = document.getElementById('remoteTarget');
 const createOfferBtn = document.getElementById('createOfferBtn');
 const pasteAnswerBtn = document.getElementById('pasteAnswerBtn');
 const acceptRemoteBtn = document.getElementById('acceptRemoteBtn');
@@ -78,230 +93,303 @@ createOfferBtn.addEventListener('click', () => createOfferFlow());
 pasteAnswerBtn.addEventListener('click', () => acceptAnswerFlow());
 acceptRemoteBtn.addEventListener('click', () => acceptRemoteFlow());
 
-/* geolocation */
-let watchId = null;
+/* -----------------------
+   Geolocation
+   ----------------------- */
 function getPos() {
- if (!('geolocation' in navigator)) {
- console.error('Geolocation not available');
- return;
- }
- watchId = navigator.geolocation.watchPosition(p => {
- localPos = {lat: p.coords.latitude, lng: p.coords.longitude};
- }, err => {
- console.error('geolocation error', err);
- }, {enableHighAccuracy:true, maximumAge:2000});
+  if (!('geolocation' in navigator)) {
+    console.error('Geolocation API is not available.');
+    return;
+  }
+  watchId = navigator.geolocation.watchPosition(p => {
+    localPos = {lat: p.coords.latitude, lng: p.coords.longitude};
+    localAccuracy = p.coords.accuracy || 100;
+  }, err => {
+    console.error('Geolocation error:', err);
+  }, {enableHighAccuracy:true, maximumAge:2000});
 }
 
-/* Haversine */
+/* -----------------------
+   Haversine
+   ----------------------- */
 function calcDistance(p1, p2) {
- if (!p1 || !p2) return null;
- const R = 6371000;
- const toRad = v => v * Math.PI / 180;
- const dLat = toRad(p2.lat - p1.lat);
- const dLon = toRad(p2.lng - p1.lng);
- const a = Math.sin(dLat/2)**2 + Math.cos(toRad(p1.lat)) * Math.cos(toRad(p2.lat)) * Math.sin(dLon/2)**2;
- return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  if (!p1 || !p2) return null;
+  const R = 6371000;
+  const toRad = v => v * Math.PI / 180;
+  const dLat = toRad(p2.lat - p1.lat);
+  const dLon = toRad(p2.lng - p1.lng);
+  const a = Math.sin(dLat/2)**2 + Math.cos(toRad(p1.lat)) * Math.cos(toRad(p2.lat)) * Math.sin(dLon/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
-/* Peer & DataChannel setup */
+/* -----------------------
+   WebRTC: PeerConnection & DataChannel
+   ----------------------- */
 function setupPeerConnection() {
- if (pc) return; // 既に初期化済みなら何もしない
- pc = new RTCPeerConnection();
-
- // 受信側の datachannel を受け取るハンドラ
- pc.ondatachannel = (evt) => {
-   dc = evt.channel;
-   setupDataChannel(dc);
- };
-
- pc.onicecandidate = (e) => {
-   console.log('icecandidate', e.candidate);
- };
-
- pc.onconnectionstatechange = () => {
-   console.log('pc state', pc.connectionState);
- };
+  if (pc) return;
+  pc = new RTCPeerConnection();
+  pc.ondatachannel = (evt) => { dc = evt.channel; setupDataChannel(dc); };
+  pc.onicecandidate = (e) => { if (e.candidate) console.log('ICE Candidate:', e.candidate); };
+  pc.onconnectionstatechange = () => {
+    console.log('Peer Connection State:', pc.connectionState);
+    if (pc.connectionState === 'disconnected' || pc.connectionState === 'closed') {
+      alert('接続が切断されました。');
+    }
+  };
 }
 
 function setupDataChannel(channel) {
- channel.onopen = () => {
-   console.log('datachannel open');
-   // 開いたら自分の位置を定期送信
-   if (!sendIntervalId) {
-     sendIntervalId = setInterval(() => {
-       if (channel?.readyState === 'open' && localPos) {
-         channel.send(JSON.stringify({type:'pos', pos: localPos}));
-       }
-     }, 2000);
-   }
- };
- channel.onclose = () => {
-   console.log('datachannel closed');
-   if (sendIntervalId) {
-     clearInterval(sendIntervalId);
-     sendIntervalId = null;
-   }
- };
- channel.onerror = (e) => console.error('dc error', e);
- channel.onmessage = (e) => {
-   try {
-     const data = JSON.parse(e.data);
-     if (data.pos) {
-       remotePos = data.pos;
-       distance = calcDistance(localPos, remotePos) || 0;
-     }
-   } catch(err) {
-     console.error('invalid message', e.data);
-   }
- };
+  channel.onopen = () => {
+    console.log('DataChannel opened.');
+    if (!sendIntervalId) {
+      sendIntervalId = setInterval(() => {
+        if (channel?.readyState === 'open' && localPos) {
+          channel.send(JSON.stringify({type:'pos', pos: localPos, acc: localAccuracy}));
+        }
+      }, 2000);
+    }
+  };
+  channel.onclose = () => { console.log('DataChannel closed.'); if (sendIntervalId) { clearInterval(sendIntervalId); sendIntervalId = null; } };
+  channel.onerror = (e) => console.error('DataChannel error:', e);
+  channel.onmessage = (e) => {
+    try {
+      const data = JSON.parse(e.data);
+      if (data.pos) {
+        remotePos = data.pos;
+        const remoteAccuracy = data.acc || 100;
+
+        // decoherenceNoise と isingStrength の計算
+        const maxAccuracy = 50;
+        const accuracyFactor = Math.min(1, (localAccuracy + remoteAccuracy) / (2 * maxAccuracy));
+        const distanceFactor = Math.min(1, (distance || 0) / 100000);
+        decoherenceNoise = Math.max(accuracyFactor, distanceFactor);
+        isingStrength = Math.max(0, 1 - decoherenceNoise);
+
+        // smoothing filter (simple exponential-like)
+        const smoothingFactor = 0.1 + isingStrength * 0.5;
+        if (!filteredPos) {
+          filteredPos = remotePos;
+        } else {
+          filteredPos.lat = filteredPos.lat * (1 - smoothingFactor) + remotePos.lat * smoothingFactor;
+          filteredPos.lng = filteredPos.lng * (1 - smoothingFactor) + remotePos.lng * smoothingFactor;
+        }
+
+        distance = calcDistance(localPos, filteredPos) || 0;
+      }
+    } catch(err) {
+      console.error('Received invalid message format:', e.data);
+    }
+  };
 }
 
-/* シグナリング（Offer 側）: Offer を作成して SDP を表示（ここでは Answer を待たずに戻る） */
+/* Offer / Answer フロー（手動シグナリング用） */
 async function createOfferFlow() {
- try {
-   setupPeerConnection();
-   // Offer 作成側は自分でデータチャネルを作る
-   try {
-     dc = pc.createDataChannel('bond');
-     setupDataChannel(dc);
-   } catch (err) {
-     console.warn('createDataChannel failed', err);
-   }
+  try {
+    setupPeerConnection();
+    try {
+      dc = pc.createDataChannel('bond');
+      setupDataChannel(dc);
+    } catch (err) {
+      console.warn('createDataChannel failed', err);
+    }
 
-   const offer = await pc.createOffer();
-   await pc.setLocalDescription(offer);
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
 
-   // ICE gathering を簡易に待つ
-   await new Promise(resolve => {
-     if (pc.iceGatheringState === 'complete') return resolve();
-     function check() {
-       if (pc.iceGatheringState === 'complete') {
-         pc.removeEventListener('icegatheringstatechange', check);
-         resolve();
-       }
-     }
-     pc.addEventListener('icegatheringstatechange', check);
-     setTimeout(resolve, 5000);
-   });
+    await new Promise(resolve => {
+      if (pc.iceGatheringState === 'complete') return resolve();
+      function check() {
+        if (pc.iceGatheringState === 'complete') {
+          pc.removeEventListener('icegatheringstatechange', check);
+          resolve();
+        }
+      }
+      pc.addEventListener('icegatheringstatechange', check);
+      setTimeout(resolve, 5000);
+    });
 
-   const localSDP = JSON.stringify(pc.localDescription);
-   // Offer を表示してコピーさせるだけ（Answer は別ボタンで貼り付ける）
-   alert('Offer SDP を生成しました。相手に送ってください（表示は次のダイアログに出ます）。');
-   // long prompt so user can copy
-   prompt('この SDP (Offer) を相手に送ってください（コピーして閉じてOK）。', localSDP);
- } catch (err) {
-   console.error('createOfferFlow error', err);
-   alert('Offer 生成に失敗しました: ' + err);
- }
+    const localSDP = JSON.stringify(pc.localDescription);
+    alert('Offer SDP を生成しました。相手に送ってください（表示は次のダイアログに出ます）。');
+    prompt('この SDP (Offer) を相手に送ってください（コピーして閉じてOK）。', localSDP);
+  } catch (err) {
+    console.error('createOfferFlow error', err);
+    alert('Offer 生成に失敗しました: ' + err);
+  }
 }
 
-/* Offer 側が Answer を貼るための処理（別ボタン） */
 async function acceptAnswerFlow() {
- if (!pc) {
-   alert('まず Offer を作成してください（「Offer を作る」ボタン）。');
-   return;
- }
- const remoteSDP = prompt('相手から受け取った Answer SDP をここに貼ってください。');
- if (!remoteSDP) return;
- try {
-   const desc = JSON.parse(remoteSDP);
-   await pc.setRemoteDescription(desc);
-   alert('Answer をセットしました。接続が確立されるまでお待ちください。');
- } catch (err) {
-   console.error('acceptAnswerFlow error', err);
-   alert('Answer のセットに失敗しました: ' + err);
- }
+  if (!pc) {
+    alert('まず Offer を作成してください（「Offer を生成する」ボタン）。');
+    return;
+  }
+  const remoteSDP = prompt('相手から受け取った Answer SDP をここに貼ってください。');
+  if (!remoteSDP) return;
+  try {
+    const desc = JSON.parse(remoteSDP);
+    await pc.setRemoteDescription(desc);
+    alert('Answer をセットしました。接続が確立されるまでお待ちください。');
+  } catch (err) {
+    console.error('acceptAnswerFlow error', err);
+    alert('Answer のセットに失敗しました: ' + err);
+  }
 }
 
-/* シグナリング（Answer 側）: 受け取った Offer を貼って Answer を生成して返す */
 async function acceptRemoteFlow() {
- try {
-   setupPeerConnection();
-   const remoteSDP = prompt('相手から受け取った Offer の SDP を貼ってください。キャンセルで中止します。');
-   if (!remoteSDP) return;
-   const offer = JSON.parse(remoteSDP);
-   await pc.setRemoteDescription(offer);
+  try {
+    setupPeerConnection();
+    const remoteSDP = prompt('相手から受け取った Offer の SDP を貼ってください。キャンセルで中止します。');
+    if (!remoteSDP) return;
+    const offer = JSON.parse(remoteSDP);
+    await pc.setRemoteDescription(offer);
 
-   const answer = await pc.createAnswer();
-   await pc.setLocalDescription(answer);
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
 
-   // ICE gather wait
-   await new Promise(resolve => {
-     if (pc.iceGatheringState === 'complete') return resolve();
-     function check() {
-       if (pc.iceGatheringState === 'complete') {
-         pc.removeEventListener('icegatheringstatechange', check);
-         resolve();
-       }
-     }
-     pc.addEventListener('icegatheringstatechange', check);
-     setTimeout(resolve, 5000);
-   });
+    await new Promise(resolve => {
+      if (pc.iceGatheringState === 'complete') return resolve();
+      function check() {
+        if (pc.iceGatheringState === 'complete') {
+          pc.removeEventListener('icegatheringstatechange', check);
+          resolve();
+        }
+      }
+      pc.addEventListener('icegatheringstatechange', check);
+      setTimeout(resolve, 5000);
+    });
 
-   const localSDP = JSON.stringify(pc.localDescription);
-   // 回答（Answer）を表示して相手に送らせる
-   prompt('これがあなたの Answer SDP です。相手に送り、彼らがセットするように伝えてください。', localSDP);
- } catch (err) {
-   console.error('acceptRemoteFlow error', err);
-   alert('Offer の処理に失敗しました: ' + err);
- }
+    const localSDP = JSON.stringify(pc.localDescription);
+    prompt('これがあなたの Answer SDP です。相手に送り、彼らがセットするように伝えてください。', localSDP);
+  } catch (err) {
+    console.error('acceptRemoteFlow error', err);
+    alert('Offer の処理に失敗しました: ' + err);
+  }
 }
 
-/* 描画更新: heartCrystal のワールド位置を参照して線を引く */
+/* -----------------------
+   TDGL 実装（単一スカラー ψ）
+   ----------------------- */
+/* パラメータ（調整可） */
+let psi = 0.8;
+const dt = 0.5;
+const Gamma = 1.0;
+const a0 = 1.0;
+const Tc = 1.0;
+const bGL = 2.0;
+const noiseSigma = 0.02;
+const P_max = 0.5;
+const betaP = 5.0;
+const T0 = 0.5;
+const alpha_distance = 1.0 / 1000.0;
+const alpha_noise = 1.0;
+
+/* Box-Muller */
+function randn() {
+  let u=0,v=0;
+  while(u===0) u=Math.random();
+  while(v===0) v=Math.random();
+  return Math.sqrt(-2.0*Math.log(u))*Math.cos(2.0*Math.PI*v);
+}
+
+function evolveOrderParameterStep(distanceVal, decoherenceNoiseVal) {
+  const T_eff = T0 + alpha_distance * (distanceVal || 0) + alpha_noise * (decoherenceNoiseVal || 0);
+  const a = a0 * (T_eff - Tc);
+  const deterministic = -Gamma * (a * psi + bGL * Math.pow(psi, 3));
+  const stochastic = noiseSigma * randn();
+  psi = psi + dt * (deterministic + stochastic);
+  if (!isFinite(psi)) psi = 0;
+  psi = Math.max(0, Math.min(1.2, psi));
+  return { psi, T_eff, a };
+}
+
+/* -----------------------
+   描画更新（updateVisuals）
+   ----------------------- */
 function updateVisuals() {
- // 数値テキスト（DOM）を更新（視認性のため）
- if (distance != null) {
-   distanceTextDOM.textContent = distance < 1000 ? `${distance.toFixed(0)} m` : `${(distance/1000).toFixed(1)} km`;
- }
+  // 距離表示更新
+  if (distance != null) {
+    distanceDisplayDOM.textContent = distance < 1000 ? `${distance.toFixed(0)} m` : `${(distance/1000).toFixed(1)} km`;
+  }
 
- // ハート表示（gps-entity-place を使い、モデルは assets で指定）
- if (remotePos) {
-   heartCrystal.setAttribute('visible', true);
-   heartCrystal.setAttribute('gps-entity-place', `latitude:${remotePos.lat}; longitude:${remotePos.lng}`);
-   const crystalSize = 0.5 + (distance || 0) / 200000;
-   heartCrystal.setAttribute('gltf-model', '#heart');
-   heartCrystal.setAttribute('scale', `${crystalSize} ${crystalSize} ${crystalSize}`);
-   heartCrystal.setAttribute('animation', `property: rotation; to: 0 360 0; loop: true; dur: ${8000 + (distance || 0)/100}; easing: linear`);
- }
+  // TDGL 更新と確率計算
+  const decoh = decoherenceNoise || 0;
+  const stepRes = evolveOrderParameterStep(distance, decoh);
+  const psiVal = stepRes.psi;
+  const blockProb = P_max * Math.exp(-betaP * (psiVal * psiVal));
+  const blockProbPercent = (blockProb * 100).toFixed(1);
+  probabilityDisplayDOM.textContent = `ブロック発生確率: ${blockProbPercent}% (ψ=${psiVal.toFixed(3)})`;
 
- // bond（線）はカメラのワールド座標と heartCrystal のワールド座標で描く
- const camEl = document.querySelector('[camera]');
- if (window.THREE && camEl && heartCrystal && heartCrystal.object3D && camEl.object3D) {
-   const camPos = new THREE.Vector3();
-   camEl.object3D.getWorldPosition(camPos);
-   const tgtPos = new THREE.Vector3();
-   heartCrystal.object3D.getWorldPosition(tgtPos);
+  if (blockProb > 0.3) {
+    probabilityDisplayDOM.style.color = '#ff1f1f';
+  } else if (blockProb > 0.1) {
+    probabilityDisplayDOM.style.color = '#ff9900';
+  } else {
+    probabilityDisplayDOM.style.color = '#1fff1f';
+  }
 
-   bondLine.setAttribute('line', {
-     start: `${camPos.x} ${camPos.y} ${camPos.z}`,
-     end: `${tgtPos.x} ${tgtPos.y} ${tgtPos.z}`,
-     color: `hsl(${Math.min(360, 300 + ((distance || 0) / 100000) * 60)}, 100%, ${Math.min(100, (0.6 + ((distance || 0) / 200000))*100)}%)`,
-     opacity: Math.max(0.4, 1 - ((distance || 0) / 1000000))
-   });
- }
+  // remoteTarget 表示・ノイズ反映
+  if (filteredPos) {
+    const maxJitter = 0.00001 * decoh;
+    const displayPos = {
+      lat: filteredPos.lat + (Math.random()*2 - 1) * maxJitter,
+      lng: filteredPos.lng + (Math.random()*2 - 1) * maxJitter
+    };
+    remoteTarget.setAttribute('visible', true);
+    remoteTarget.setAttribute('gps-entity-place', `latitude:${displayPos.lat}; longitude:${displayPos.lng}`);
+
+    const baseSize = 0.5 + (distance || 0) / 200000;
+    const jitterStrength = (1 - Math.min(1, psiVal)) * 0.3;
+    const scaleNoise = (Math.random()*2 -1) * jitterStrength * 0.2;
+    const finalScale = Math.max(0.05, baseSize + scaleNoise);
+    remoteTarget.setAttribute('gltf-model', '#heart');
+    remoteTarget.setAttribute('scale', `${finalScale} ${finalScale} ${finalScale}`);
+
+    const rotationSpeed = 8000 + (distance || 0)/100;
+    const rotationDir = psiVal < 0.7 ? 'alternate' : 'normal';
+    const rotationRange = 360 + 90 * (1 - psiVal) * (Math.random()*2 - 1);
+    remoteTarget.setAttribute('animation', `property: rotation; to: 0 ${rotationRange} 0; loop: true; dir: ${rotationDir}; dur: ${rotationSpeed}`);
+  }
+
+  // bond（線）の描画（カメラと remoteTarget のワールド座標）
+  const camEl = document.querySelector('[camera]');
+  if (window.THREE && camEl && remoteTarget && remoteTarget.object3D && camEl.object3D) {
+    const camPos = new THREE.Vector3();
+    camEl.object3D.getWorldPosition(camPos);
+    const tgtPos = new THREE.Vector3();
+    remoteTarget.object3D.getWorldPosition(tgtPos);
+
+    const baseOpacity = Math.max(0.15, 1 - ((distance || 0) / 1000000));
+    const lineOpacity = Math.max(0.05, baseOpacity * (1 - decoh * 0.5) + (Math.random() * 0.3 * (1 - psiVal)));
+
+    const hue = Math.min(360, 300 + ((distance || 0) / 100000) * 60);
+    const lightness = Math.min(100, (0.6 + ((distance || 0) / 200000)) * 100);
+
+    connectionLine.setAttribute('line', {
+      start: `${camPos.x} ${camPos.y} ${camPos.z}`,
+      end: `${tgtPos.x} ${tgtPos.y} ${tgtPos.z}`,
+      color: `hsl(${hue}, 100%, ${lightness}%)`,
+      opacity: lineOpacity
+    });
+  }
 }
 
-/* シーンロード後に定期的に updateVisuals を呼ぶ（heart の world pos は非同期） */
-AFRAME.scenes[0]?.addEventListener
-  ? AFRAME.scenes[0].addEventListener('loaded', () => {
-      setInterval(updateVisuals, 500);
-    })
-  : setInterval(updateVisuals, 500);
+/* イベント: シーン読み込み後に定期更新 */
+document.querySelector('a-scene').addEventListener('loaded', () => {
+  setInterval(updateVisuals, 500);
+});
 
 /* 初期化 */
 getPos();
 
-/* アンロード時のクリーンアップ */
+/* クリーンアップ */
 window.addEventListener('beforeunload', () => {
- if (watchId != null) navigator.geolocation.clearWatch(watchId);
- if (sendIntervalId) clearInterval(sendIntervalId);
- if (pc) pc.close();
+  if (watchId != null) navigator.geolocation.clearWatch(watchId);
+  if (sendIntervalId) clearInterval(sendIntervalId);
+  if (pc) pc.close();
 });
 </script>
 
-<!-- ハートの3Dモデル（シンプルなハート） -->
 <a-assets>
- <a-asset-item id="heart" src="https://cdn.jsdelivr.net/gh/mrdoob/three.js@master/examples/models/gltf/heart.glb"></a-asset-item>
+  <a-asset-item id="heart" src="https://cdn.jsdelivr.net/gh/mrdoob/three.js@master/examples/models/gltf/heart.glb"></a-asset-item>
 </a-assets>
 </body>
 </html>
